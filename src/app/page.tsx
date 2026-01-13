@@ -1,39 +1,26 @@
 "use client";
 
 import { useMutation } from "@tanstack/react-query";
-import { nanoid } from "nanoid";
-import { useEffect, useState } from "react";
 import { api } from "../lib/eden";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useUsername } from "../hooks/useUsername";
+import { Suspense } from "react";
 
-const ANIMALS = ["lion", "tiger", "bear", "eagle", "shark", "wolf"];
-const STORAGE_KEY = "chat_username";
-
-function generateUsername() {
-  const word = ANIMALS[Math.floor(Math.random() * ANIMALS.length)];
-  return `anonymous-${word}-${nanoid(5)}`;
+const Page = () => {
+  return (
+    <Suspense>
+      <Home />
+    </Suspense>
+  )
 }
 
-export default function Home() {
-  const [username, setUsername] = useState("");
+function Home() {
   const router = useRouter();
+  const { username } = useUsername();
 
-  useEffect(() => {
-    const main = () => {
-      const stored = localStorage.getItem(STORAGE_KEY);
-
-      if (stored) {
-        setUsername(stored);
-        return;
-      }
-
-      const generated = generateUsername();
-      setUsername(generated);
-      localStorage.setItem(STORAGE_KEY, generated);
-    };
-
-    main();
-  }, []);
+  const searchParams = useSearchParams();
+  const wasDestroyed = searchParams.get("destroyed") === "true";
+  const error = searchParams.get("error");
 
   const { mutate: createRoom } = useMutation({
     mutationFn: async () => {
@@ -48,6 +35,30 @@ export default function Home() {
   return (
     <main className="flex min-h-screen flex-col items-center justify-center p-4">
       <div className="w-full max-w-md space-y-8">
+        {wasDestroyed && (
+          <div className="bg-red-950/50 border-red-900 p-4 text-center">
+            <p className="text-red-500 text-sm font-bold">ROOM DESTROYED</p>
+            <p className="text-zinc-500 text-xs mt-1">
+              All messages were permanently deleted.
+            </p>
+          </div>
+        )}
+        {error === "room_not_found" && (
+          <div className="bg-red-950/50 border-red-900 p-4 text-center">
+            <p className="text-red-500 text-sm font-bold">ROOM NOT FOUND</p>
+            <p className="text-zinc-500 text-xs mt-1">
+              The room you are looking for does not exist or has expired.
+            </p>
+          </div>
+        )}
+        {error === "room_full" && (
+          <div className="bg-red-950/50 border-red-900 p-4 text-center">
+            <p className="text-red-500 text-sm font-bold">ROOM FULL</p>
+            <p className="text-zinc-500 text-xs mt-1">
+              The room is at its maximum capacity. Please try again later.
+            </p>
+          </div>
+        )}
         <div className="text-center space-y-2">
           <h1 className="text-2xl font-bold tracking-tight text-green-500">
             {">"}private_chat
@@ -81,3 +92,5 @@ export default function Home() {
     </main>
   );
 }
+
+export default Page;

@@ -1,6 +1,6 @@
 # 🔐 Private Chat
 
-A private, self-destructing chat room application with a terminal-inspired aesthetic. Create ephemeral chat rooms that automatically expire after 10 minutes.
+A private, self-destructing chat room application with a terminal-inspired aesthetic. Create ephemeral chat rooms that automatically expire after 10 minutes with real-time messaging.
 
 ![Next.js](https://img.shields.io/badge/Next.js-16-black?style=flat-square&logo=next.js)
 ![Elysia](https://img.shields.io/badge/Elysia-1.4-blueviolet?style=flat-square)
@@ -12,6 +12,7 @@ A private, self-destructing chat room application with a terminal-inspired aesth
 ## ✨ Features
 
 - **Ephemeral Rooms** – Chat rooms self-destruct after 10 minutes
+- **Real-time Messaging** – Instant message delivery via Upstash Realtime
 - **Anonymous Identity** – Auto-generated usernames (e.g., `anonymous-tiger-x7k2p`)
 - **Real-time Countdown** – Visual timer showing remaining room lifetime
 - **Copy & Share** – One-click room URL sharing
@@ -27,6 +28,7 @@ A private, self-destructing chat room application with a terminal-inspired aesth
 | **Framework** | [Next.js 16](https://nextjs.org/) (App Router) |
 | **API** | [Elysia.js](https://elysiajs.com/) – Bun-first web framework |
 | **Database** | [Upstash Redis](https://upstash.com/) – Serverless Redis |
+| **Realtime** | [Upstash Realtime](https://upstash.com/docs/redis/sdks/realtime/overview) – Real-time pub/sub |
 | **Type-safe Client** | [Eden Treaty](https://elysiajs.com/eden/treaty.html) – End-to-end typesafe API |
 | **State Management** | [TanStack React Query](https://tanstack.com/query) |
 | **Styling** | [Tailwind CSS 4](https://tailwindcss.com/) |
@@ -46,10 +48,33 @@ A private, self-destructing chat room application with a terminal-inspired aesth
        │                                              │
        │ Redirect to /room/[roomId]                   │ HSET meta:{roomId}
        ▼                                              ▼
-┌─────────────┐                                ┌─────────────┐
-│  Room Page  │                                │   Upstash   │
-│  /room/xyz  │                                │    Redis    │
+┌─────────────┐     Upstash Realtime           ┌─────────────┐
+│  Room Page  │ ◄──────────────────────────────│   Upstash   │
+│  /room/xyz  │        (WebSocket)             │    Redis    │
 └─────────────┘                                └─────────────┘
+```
+
+### Real-time Communication
+
+The app uses **Upstash Realtime** for instant message delivery:
+
+1. When a user sends a message, the API stores it in Redis and emits a `chat.message` event
+2. All connected clients in the room receive the event via WebSocket
+3. The UI updates instantly without polling
+
+```typescript
+// Server: Emit message event
+await realtime.channel(roomId).emit("chat.message", message);
+
+// Client: Listen for events
+useRealtime({
+  channels: [roomId],
+  events: ["chat.message", "chat.destroy"],
+  onData: ({ event }) => {
+    if (event === "chat.message") refetch();
+    if (event === "chat.destroy") router.push("/?destroyed=true");
+  },
+});
 ```
 
 ### Core Components
@@ -90,15 +115,40 @@ function generateUsername() {
 }
 ```
 
-#### 3. **Room Page** (`/room/[roomId]`)
+#### 3. **Messaging** (`/api/messages`)
 
-The room page displays:
-- **Room ID** with copy-to-clipboard functionality
-- **Self-destruct countdown** showing remaining time
-- **Message input** with terminal-style prompt (`>`)
-- **Destroy button** for immediate room termination
+Messages are stored in Redis lists and broadcast via Upstash Realtime:
 
-#### 4. **Type-Safe API Client** (Eden Treaty)
+```typescript
+// Store message with sender's token for ownership tracking
+await redis.rpush(`messages:${roomId}`, {
+  ...message,
+  token: auth.token,
+});
+
+// Broadcast to all connected clients
+await realtime.channel(roomId).emit("chat.message", message);
+```
+
+#### 4. **Room Destruction** (`DELETE /api/rooms`)
+
+Rooms can be destroyed manually or expire automatically:
+
+```typescript
+// Notify all clients before deletion
+await realtime.channel(auth.roomId).emit("chat.destroy", {
+  isDestroyed: true,
+});
+
+// Clean up all room data
+await Promise.all([
+  redis.del(auth.roomId),
+  redis.del(`meta:${auth.roomId}`),
+  redis.del(`messages:${auth.roomId}`),
+]);
+```
+
+#### 5. **Type-Safe API Client** (Eden Treaty)
 
 Eden Treaty provides end-to-end type safety between the Elysia backend and React frontend:
 
@@ -134,11 +184,9 @@ Creates a new ephemeral chat room.
 POST /api/rooms/create
 ```
 
-**Request**
+**Request**: No body required.
 
-No request body required.
-
-**Response**
+**Response**:
 
 ```json
 {
@@ -146,25 +194,106 @@ No request body required.
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `roomId` | `string` | Unique room identifier (nanoid, 21 chars) |
+---
 
-**Example**
+#### Get Room TTL
 
-```bash
-curl -X POST http://localhost:3000/api/rooms/create
+Returns the remaining time-to-live for a room in seconds.
+
+```http
+GET /api/rooms/ttl?roomId={roomId}
 ```
+
+**Query Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `roomId` | `string` | The room identifier |
+
+**Response**:
 
 ```json
 {
-  "roomId": "xK9_mZpL2rT5vQ8wYnE3a"
+  "ttl": 542
 }
 ```
 
-**Notes**
-- Room expires automatically after **10 minutes** (600 seconds)
-- Room data is stored in Redis with key `meta:{roomId}`
+---
+
+#### Destroy Room
+
+Immediately destroys a room and notifies all connected clients.
+
+```http
+DELETE /api/rooms?roomId={roomId}
+```
+
+**Query Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `roomId` | `string` | The room identifier |
+
+**Response**: `200 OK` (no body)
+
+---
+
+#### Send Message
+
+Sends a message to a room.
+
+```http
+POST /api/messages?roomId={roomId}
+```
+
+**Query Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `roomId` | `string` | The room identifier |
+
+**Request Body**:
+
+```json
+{
+  "sender": "anonymous-wolf-k8x2p",
+  "text": "Hello, world!"
+}
+```
+
+**Response**: `200 OK` (no body)
+
+---
+
+#### Get Messages
+
+Retrieves all messages in a room.
+
+```http
+GET /api/messages?roomId={roomId}
+```
+
+**Query Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `roomId` | `string` | The room identifier |
+
+**Response**:
+
+```json
+{
+  "messages": [
+    {
+      "id": "abc123",
+      "sender": "anonymous-wolf-k8x2p",
+      "text": "Hello!",
+      "timestamp": 1736784000000,
+      "roomId": "V1StGXR8_Z5jdHi6B-myT"
+    }
+  ]
+}
+```
 
 ---
 
@@ -181,6 +310,25 @@ Fields:
   - connected: [] (array of connected user IDs)
   - createdAt: 1736784000000 (Unix timestamp in ms)
 ```
+
+#### Messages
+
+```
+Key: messages:{roomId}
+Type: List
+TTL: Synced with room TTL
+
+Elements: JSON objects with id, sender, text, timestamp, roomId, token
+```
+
+---
+
+### Realtime Events
+
+| Event | Channel | Payload | Description |
+|-------|---------|---------|-------------|
+| `chat.message` | `{roomId}` | `Message` object | New message sent |
+| `chat.destroy` | `{roomId}` | `{ isDestroyed: true }` | Room destroyed |
 
 ---
 
@@ -239,19 +387,26 @@ realtime_chat/
 ├── src/
 │   ├── app/
 │   │   ├── api/
-│   │   │   └── [[...slugs]]/
-│   │   │       └── route.ts      # Elysia API routes
+│   │   │   ├── [[...slugs]]/
+│   │   │   │   ├── route.ts          # Elysia API routes
+│   │   │   │   └── auth.ts           # Auth middleware
+│   │   │   └── realtime/
+│   │   │       └── route.ts          # Realtime WebSocket endpoint
 │   │   ├── room/
 │   │   │   └── [roomId]/
-│   │   │       └── page.tsx      # Chat room page
-│   │   ├── globals.css           # Global styles
-│   │   ├── layout.tsx            # Root layout with providers
-│   │   └── page.tsx              # Home page (room creation)
+│   │   │       └── page.tsx          # Chat room page
+│   │   ├── globals.css               # Global styles
+│   │   ├── layout.tsx                # Root layout with providers
+│   │   └── page.tsx                  # Home page (room creation)
 │   ├── components/
-│   │   └── Providers.tsx         # React Query provider
+│   │   └── Providers.tsx             # React Query provider
+│   ├── hooks/
+│   │   └── useUsername.ts            # Username generation hook
 │   └── lib/
-│       ├── eden.ts               # Type-safe API client
-│       └── redis.ts              # Upstash Redis instance
+│       ├── eden.ts                   # Type-safe API client
+│       ├── realtime.ts               # Upstash Realtime server config
+│       ├── realtime-client.ts        # Realtime React hook
+│       └── redis.ts                  # Upstash Redis instance
 ├── package.json
 ├── tsconfig.json
 └── README.md
